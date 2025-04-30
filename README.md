@@ -1,48 +1,47 @@
-Vintage Story Server Updater (vs-update)
-========================================
+# Vintage Story Server Updater
 
-This script automates the process of updating a Vintage Story dedicated server.
-It downloads a new release tarball, deletes old server files, preserves your
-server.sh script, and logs all deletions and update events.
+A multi-user-safe, install-directory-scoped shell toolkit to update and manage a Vintage Story dedicated server.
 
-All logs and backups are kept inside hidden folders in your Vintage Story
-install directory. This makes the script portable and safe to run from any user
-account with write access to that directory.
+## 📦 Included Scripts
 
-Maintained by: Ender Vaedorn <ender@endershollow.com>
+- `vs-update`: Downloads and installs a new Vintage Story server build
+- `vs-log-viewer`: View past update or deletion logs
+- `vs-config-reset`: Change the configured server install path
+- `vs-backup-restore`: Restore the previously backed up `server.sh`
 
-Usage Instructions for vs-update
-================================
+## 🔧 Installation (via .deb)
 
-1. Place the script `vs-update-standalone.sh` anywhere you'd like.
-2. Make it executable:
-   chmod +x vs-update-standalone.sh
+1. Download the `.deb` file from this release.
+2. Install it using:
+   ```bash
+   sudo dpkg -i vs-updater-1.1-multiuser.deb
+   ```
 
-3. Run the script:
-   ./vs-update-standalone.sh
+3. Run the updater:
+   ```bash
+   vs-update
+   ```
 
-4. On first run, it will prompt for:
-   - The path to your Vintage Story install directory (e.g., /home/server)
-   - The URL to download the latest VS server release (.tar.gz)
+## 📁 Where Files Go
 
-5. The script will:
-   - Backup server.sh (to .vs-backups/)
-   - Delete old files (excluding .vs-* folders)
-   - Extract the new server package
-   - Restore server.sh
-   - Log all events in .vs-logs/ within your install directory
+All config, logs, and backups are stored inside your server's install directory:
+```
+.your-server-dir/
+├── .vs-config
+├── .vs-logs/
+├── .vs-backups/
+├── .vs-temp/
+```
 
-6. Subsequent runs will reuse your previously entered path unless you delete `.vs-config`.
+## 💡 Requirements
 
-Requirements:
--------------
-- bash
-- curl
-- tar
-- whiptail (sudo apt install whiptail)
+- `bash`
+- `curl`
+- `tar`
+- `whiptail`  
+  (Install via `sudo apt install whiptail`)
 
-Notes:
-------
-- Run as any user with write access to the install directory.
-- Works well with sudo or non-login user environments.
+## 📄 Author
 
+Maintained by **Ender Vaedorn**  
+📧 ender@endershollow.com
