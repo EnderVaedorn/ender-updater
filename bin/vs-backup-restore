@@ -1,0 +1,286 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR="${VS_UPDATER_LIB_DIR:-/usr/lib/vs-updater/lib}"
+if [ -f "$SCRIPT_DIR/../lib/instance-config.sh" ]; then
+  LIB_DIR="$SCRIPT_DIR/../lib"
+fi
+
+. "$LIB_DIR/instance-config.sh"
+. "$LIB_DIR/safety.sh"
+
+CONFIG_FILE="$VS_UPDATER_CONFIG_FILE"
+INSTANCE_NAME=""
+INSTANCE_DATA_PATH=""
+INSTANCE_SERVICE_NAME=""
+RESTORE_STAGING_DIR=""
+RESTORE_MOVE_DESTINATION=""
+TRASHED_PAYLOAD=""
+
+cleanup() {
+  if [ -n "$RESTORE_STAGING_DIR" ] && [ -d "$RESTORE_STAGING_DIR" ]; then
+    rm -rf -- "$RESTORE_STAGING_DIR"
+  fi
+}
+
+trap cleanup EXIT
+
+usage() {
+  cat <<EOF
+Usage: vs-backup-restore [--instance NAME] [--list] [--snapshot PATH] [INSTALL_DIR]
+
+List or restore updater rollback snapshots.
+
+By default, the newest snapshot under INSTALL_DIR/.vs-backups is restored.
+The current live payload is moved to .vs-updater-trash before restoration.
+EOF
+}
+
+validate_instance_name() {
+  vsu_validate_instance_name "$1"
+}
+
+instance_config_path() {
+  vsu_instance_config_path "$1"
+}
+
+read_config_value() {
+  vsu_read_config_value "$@"
+}
+
+load_install_dir() {
+  if [ -n "${1:-}" ]; then
+    local install_dir
+    local overlap
+    local name
+    local path
+
+    install_dir=$(vsu_validate_install_dir "$1")
+    if overlap=$(vsu_find_overlapping_instance "$install_dir"); then
+      name="${overlap%%	*}"
+      path="${overlap#*	}"
+      printf 'Error: install directory overlaps registered instance %s (%s). Use --instance %s instead.\n' "$name" "$path" "$name" >&2
+      exit 1
+    fi
+    printf '%s' "$install_dir"
+    return
+  fi
+
+  if [ -n "$INSTANCE_NAME" ]; then
+    local file
+    file=$(instance_config_path "$INSTANCE_NAME")
+    vsu_load_instance_config "$INSTANCE_NAME"
+    INSTANCE_DATA_PATH=$(read_config_value "$file" DATA_PATH || true)
+    INSTANCE_SERVICE_NAME=$(read_config_value "$file" SERVICE_NAME || true)
+    read_config_value "$file" INSTALL_DIR || {
+      printf 'Error: unknown instance or missing INSTALL_DIR: %s\n' "$INSTANCE_NAME" >&2
+      exit 1
+    }
+    return
+  fi
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    printf 'Error: no saved install directory. Run vs-update, vs-update --add-instance, or vs-config-reset first.\n' >&2
+    exit 1
+  fi
+
+  IFS= read -r INSTALL_DIR < "$CONFIG_FILE"
+  printf '%s' "$INSTALL_DIR"
+}
+
+confirm_restore() {
+  local snapshot="$1"
+  local install_dir="$2"
+
+  if [ "${VS_UPDATER_ASSUME_YES:-false}" = true ]; then
+    return 0
+  fi
+
+  if command -v whiptail >/dev/null 2>&1 && [ -t 1 ]; then
+    whiptail --title "Vintage Story Updater" \
+      --yesno "Restore snapshot into $install_dir?\n\n$snapshot\n\nThe current live payload will be moved to review trash." 14 76
+    return
+  fi
+
+  printf 'Restore snapshot into %s?\n%s\nType yes to continue: ' "$install_dir" "$snapshot" >&2
+  IFS= read -r answer
+  [ "$answer" = "yes" ]
+}
+
+snapshot_is_safe() {
+  local snapshot="$1"
+  local backup_dir="$2"
+  local resolved_snapshot
+  local resolved_backup_dir
+
+  [ -d "$snapshot" ] || return 1
+  resolved_snapshot=$(realpath -e -- "$snapshot") || return 1
+  resolved_backup_dir=$(realpath -e -- "$backup_dir") || return 1
+  case "$resolved_snapshot/" in
+    "$resolved_backup_dir/"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+move_live_payload_to_trash() {
+  local install_dir="$1"
+  local trash_dir="$2"
+  local prefix="${3:-restored-over-payload}"
+  local timestamp
+  local destination
+  local counter=1
+  local item
+
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  destination="$trash_dir/$prefix-$timestamp"
+  while [ -e "$destination" ]; do
+    counter=$((counter + 1))
+    destination="$trash_dir/$prefix-$timestamp-$counter"
+  done
+  mkdir -p -- "$destination"
+  vsu_write_trash_readme "$trash_dir"
+  RESTORE_MOVE_DESTINATION="$destination"
+
+  while IFS= read -r -d '' item; do
+    mv -- "$item" "$destination/"
+  done < <(
+    find "$install_dir" -mindepth 1 -maxdepth 1 \
+      ! -name '.vs-backups' ! -name '.vs-logs' ! -name '.vs-updater-trash' \
+      -print0
+  )
+
+  printf '%s' "$destination"
+}
+
+move_live_payload_to_trash_safe() {
+  local install_dir="$1"
+  local trash_dir="$2"
+
+  RESTORE_MOVE_DESTINATION=""
+  move_live_payload_to_trash "$install_dir" "$trash_dir" >/dev/null || {
+    if [ -n "$RESTORE_MOVE_DESTINATION" ] && [ -d "$RESTORE_MOVE_DESTINATION" ]; then
+      restore_payload_from_trash "$install_dir" "$RESTORE_MOVE_DESTINATION" || true
+    fi
+    return 1
+  }
+  TRASHED_PAYLOAD="$RESTORE_MOVE_DESTINATION"
+}
+
+restore_payload_from_trash() {
+  local install_dir="$1"
+  local payload_dir="$2"
+  local item
+
+  while IFS= read -r -d '' item; do
+    mv -- "$item" "$install_dir/" || return 1
+  done < <(find "$payload_dir" -mindepth 1 -maxdepth 1 -print0)
+}
+
+LIST_ONLY=false
+SNAPSHOT=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --list)
+      LIST_ONLY=true
+      shift
+      ;;
+    --instance)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --instance requires a name.\n' >&2
+        exit 1
+      }
+      INSTANCE_NAME="$2"
+      shift 2
+      ;;
+    --snapshot)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --snapshot requires a path.\n' >&2
+        exit 1
+      }
+      SNAPSHOT="$2"
+      shift 2
+      ;;
+    --yes)
+      VS_UPDATER_ASSUME_YES=true
+      shift
+      ;;
+    *)
+      INSTALL_DIR_ARG="$1"
+      shift
+      ;;
+  esac
+done
+
+INSTALL_DIR=$(load_install_dir "${INSTALL_DIR_ARG:-}")
+BACKUP_DIR="$INSTALL_DIR/.vs-backups"
+TRASH_DIR="$INSTALL_DIR/.vs-updater-trash"
+SUMMARY_LOG="$INSTALL_DIR/.vs-logs/vs-server-updater.log"
+
+if [ "$LIST_ONLY" = true ]; then
+  [ -d "$BACKUP_DIR" ] || exit 0
+  find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -name 'server-backup-*' ! -name '*.partial' -type d -print 2>/dev/null | sort
+  exit 0
+fi
+
+if [ -z "$SNAPSHOT" ]; then
+  SNAPSHOT=$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -name 'server-backup-*' ! -name '*.partial' -type d -print 2>/dev/null | sort | tail -n 1)
+fi
+
+[ -n "$SNAPSHOT" ] || {
+  printf 'Error: no rollback snapshots found in: %s\n' "$BACKUP_DIR" >&2
+  exit 1
+}
+
+snapshot_is_safe "$SNAPSHOT" "$BACKUP_DIR" || {
+  printf 'Error: snapshot must be a directory beneath %s\n' "$BACKUP_DIR" >&2
+  exit 1
+}
+
+confirm_restore "$SNAPSHOT" "$INSTALL_DIR" || {
+  printf 'Restore cancelled.\n' >&2
+  exit 1
+}
+
+vsu_acquire_instance_lock "$INSTALL_DIR" "$INSTANCE_NAME"
+
+if vsu_instance_appears_running "$INSTALL_DIR" "$INSTANCE_DATA_PATH" "$INSTANCE_SERVICE_NAME"; then
+  printf 'Error: the selected Vintage Story server instance appears to be running. Stop it first or pass no restore command.\n' >&2
+  exit 1
+fi
+
+RESTORE_STAGING_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vs-updater-restore.XXXXXX") || {
+  printf 'Error: could not create restore staging directory.\n' >&2
+  exit 1
+}
+
+if ! cp -a -- "$SNAPSHOT/." "$RESTORE_STAGING_DIR/"; then
+  printf 'Error: could not copy snapshot into restore staging. Live payload was not changed.\n' >&2
+  exit 1
+fi
+
+mkdir -p -- "$INSTALL_DIR" "$TRASH_DIR" "$(dirname "$SUMMARY_LOG")"
+if ! move_live_payload_to_trash_safe "$INSTALL_DIR" "$TRASH_DIR"; then
+  if [ -n "${TRASHED_PAYLOAD:-}" ] && [ -d "$TRASHED_PAYLOAD" ]; then
+    restore_payload_from_trash "$INSTALL_DIR" "$TRASHED_PAYLOAD" || true
+  fi
+  printf 'Error: could not move the current live payload to review trash. Restore was cancelled before copying the snapshot.\n' >&2
+  exit 1
+fi
+if ! cp -a -- "$RESTORE_STAGING_DIR/." "$INSTALL_DIR/"; then
+  printf 'Error: snapshot restore failed. Attempting to restore previous live payload...\n' >&2
+  move_live_payload_to_trash "$INSTALL_DIR" "$TRASH_DIR" "failed-restore-payload" >/dev/null || true
+  restore_payload_from_trash "$INSTALL_DIR" "$TRASHED_PAYLOAD" ||
+    printf 'Error: automatic restore from trash failed. Review manually: %s\n' "$TRASHED_PAYLOAD" >&2
+  exit 1
+fi
+
+printf '[%s] Restored rollback snapshot: %s | Previous payload: %s\n' "$(date)" "$SNAPSHOT" "$TRASHED_PAYLOAD" >> "$SUMMARY_LOG"
+printf 'Restored snapshot: %s\n' "$SNAPSHOT"
+printf 'Previous payload moved to review trash: %s\n' "$TRASHED_PAYLOAD"

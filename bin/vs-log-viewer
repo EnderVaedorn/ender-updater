@@ -1,0 +1,120 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR="${VS_UPDATER_LIB_DIR:-/usr/lib/vs-updater/lib}"
+if [ -f "$SCRIPT_DIR/../lib/instance-config.sh" ]; then
+  LIB_DIR="$SCRIPT_DIR/../lib"
+fi
+
+. "$LIB_DIR/instance-config.sh"
+
+CONFIG_FILE="$VS_UPDATER_CONFIG_FILE"
+INSTANCE_NAME=""
+
+usage() {
+  cat <<EOF
+Usage: vs-log-viewer [--instance NAME] [summary|deployments|trash] [INSTALL_DIR]
+
+View updater logs and review locations for a Vintage Story server install.
+If INSTALL_DIR is omitted, the saved updater config is used.
+EOF
+}
+
+validate_instance_name() {
+  vsu_validate_instance_name "$1"
+}
+
+instance_config_path() {
+  vsu_instance_config_path "$1"
+}
+
+read_config_value() {
+  vsu_read_config_value "$@"
+}
+
+load_install_dir() {
+  if [ -n "${1:-}" ]; then
+    printf '%s' "$1"
+    return
+  fi
+
+  if [ -n "$INSTANCE_NAME" ]; then
+    local file
+    file=$(instance_config_path "$INSTANCE_NAME")
+    vsu_load_instance_config "$INSTANCE_NAME"
+    read_config_value "$file" INSTALL_DIR || {
+      printf 'Error: unknown instance or missing INSTALL_DIR: %s\n' "$INSTANCE_NAME" >&2
+      exit 1
+    }
+    return
+  fi
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    printf 'Error: no saved install directory. Run vs-update, vs-update --add-instance, or vs-config-reset first.\n' >&2
+    exit 1
+  fi
+
+  IFS= read -r INSTALL_DIR < "$CONFIG_FILE"
+  printf '%s' "$INSTALL_DIR"
+}
+
+show_file_or_empty() {
+  local file="$1"
+  if [ -f "$file" ]; then
+    "${PAGER:-less}" "$file"
+  else
+    printf 'No log found: %s\n' "$file"
+  fi
+}
+
+COMMAND="summary"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --instance)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --instance requires a name.\n' >&2
+        exit 1
+      }
+      INSTANCE_NAME="$2"
+      shift 2
+      ;;
+    summary|deployments|trash)
+      COMMAND="$1"
+      shift
+      ;;
+    *)
+      INSTALL_DIR_ARG="$1"
+      shift
+      ;;
+  esac
+done
+
+INSTALL_DIR=$(load_install_dir "${INSTALL_DIR_ARG:-}")
+LOG_DIR="$INSTALL_DIR/.vs-logs"
+TRASH_DIR="$INSTALL_DIR/.vs-updater-trash"
+
+case "$COMMAND" in
+  summary)
+    show_file_or_empty "$LOG_DIR/vs-server-updater.log"
+    ;;
+  deployments)
+    if [ -d "$LOG_DIR" ] && find "$LOG_DIR" -maxdepth 1 -name 'vs-server-deployment-*.log' -type f -print -quit 2>/dev/null | grep -q .; then
+      find "$LOG_DIR" -maxdepth 1 -name 'vs-server-deployment-*.log' -type f -print 2>/dev/null | sort
+    else
+      printf 'No deployment logs found in: %s\n' "$LOG_DIR"
+    fi
+    ;;
+  trash)
+    if [ -d "$TRASH_DIR" ]; then
+      find "$TRASH_DIR" -mindepth 1 -maxdepth 1 -print | sort
+    else
+      printf 'No updater trash directory found: %s\n' "$TRASH_DIR"
+    fi
+    ;;
+esac

@@ -1,0 +1,145 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB_DIR="${VS_UPDATER_LIB_DIR:-/usr/lib/vs-updater/lib}"
+if [ -f "$SCRIPT_DIR/../lib/instance-config.sh" ]; then
+  LIB_DIR="$SCRIPT_DIR/../lib"
+fi
+
+. "$LIB_DIR/instance-config.sh"
+
+CONFIG_FILE="$VS_UPDATER_CONFIG_FILE"
+INSTANCE_NAME=""
+TARGET_DATAPATH=""
+TARGET_USERNAME="vintagestory"
+SERVICE_NAME=""
+CLEAR_CONFIG=false
+
+usage() {
+  cat <<EOF
+Usage: vs-config-reset [options] [INSTALL_DIR]
+
+Set or clear the saved Vintage Story server install directory.
+
+Options:
+  --instance NAME      Set or clear a named instance config
+  --data-path PATH     Persistent data path for a named instance
+  --username NAME      Dedicated server username for a named instance
+  --service-name NAME  Optional systemd service for a named instance
+  --clear             Remove the selected saved config
+
+When INSTALL_DIR is omitted, an interactive prompt is shown if whiptail is
+available. Without --instance, --clear removes the legacy single-install config.
+EOF
+}
+
+prompt_install_dir() {
+  if command -v whiptail >/dev/null 2>&1 && [ -t 1 ]; then
+    whiptail --title "Vintage Story Updater" \
+      --inputbox "Enter the Vintage Story server install directory:" 10 72 \
+      3>&1 1>&2 2>&3
+    return
+  fi
+
+  printf 'Install directory: ' >&2
+  IFS= read -r REPLY
+  printf '%s' "$REPLY"
+}
+
+validate_instance_name() {
+  vsu_validate_instance_name "$1"
+}
+
+instance_config_path() {
+  vsu_instance_config_path "$1"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --instance)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --instance requires a name.\n' >&2
+        exit 1
+      }
+      INSTANCE_NAME="$2"
+      shift 2
+      ;;
+    --data-path)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --data-path requires a path.\n' >&2
+        exit 1
+      }
+      TARGET_DATAPATH="$2"
+      shift 2
+      ;;
+    --username)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --username requires a name.\n' >&2
+        exit 1
+      }
+      TARGET_USERNAME="$2"
+      shift 2
+      ;;
+    --service-name)
+      [ "$#" -ge 2 ] || {
+        printf 'Error: --service-name requires a name.\n' >&2
+        exit 1
+      }
+      SERVICE_NAME="$2"
+      shift 2
+      ;;
+    --clear)
+      CLEAR_CONFIG=true
+      shift
+      ;;
+    *)
+      INSTALL_DIR="${1:-}"
+      shift
+      ;;
+  esac
+done
+
+if [ "$CLEAR_CONFIG" = true ]; then
+  if [ -n "$INSTANCE_NAME" ]; then
+    INSTANCE_FILE=$(instance_config_path "$INSTANCE_NAME")
+    rm -f -- "$INSTANCE_FILE"
+    printf 'Removed instance config: %s\n' "$INSTANCE_FILE"
+  else
+    rm -f -- "$CONFIG_FILE"
+    printf 'Removed saved install directory: %s\n' "$CONFIG_FILE"
+  fi
+  exit 0
+fi
+
+INSTALL_DIR="${INSTALL_DIR:-}"
+if [ -z "$INSTALL_DIR" ]; then
+  INSTALL_DIR=$(prompt_install_dir) || {
+    printf 'Cancelled.\n' >&2
+    exit 1
+  }
+fi
+
+INSTALL_DIR=$(vsu_validate_install_dir "$INSTALL_DIR")
+
+if [ -n "$INSTANCE_NAME" ]; then
+  if [ -z "$TARGET_DATAPATH" ]; then
+    TARGET_DATAPATH="$(dirname "$INSTALL_DIR")/data"
+  fi
+
+  if [ -z "$SERVICE_NAME" ]; then
+    printf 'Warning: no --service-name was provided for instance %s.\n' "$INSTANCE_NAME" >&2
+    printf 'Warning: multi-instance running detection is much less reliable without SERVICE_NAME; this can lead to data loss or corruption if an instance is updated while running.\n' >&2
+  fi
+
+  vsu_write_instance_config "$INSTANCE_NAME" "$INSTALL_DIR" "$TARGET_DATAPATH" "$TARGET_USERNAME" "$SERVICE_NAME"
+  printf 'Saved instance %s: %s\n' "$INSTANCE_NAME" "$INSTALL_DIR"
+else
+  vsu_write_legacy_install_dir "$INSTALL_DIR"
+  printf 'Saved install directory: %s\n' "$INSTALL_DIR"
+fi

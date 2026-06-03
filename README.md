@@ -36,6 +36,101 @@ when it is found.
 - GNU `realpath`
 - `whiptail` for interactive use
 
+## Installable Package
+
+The root-level standalone script is kept as a one-off option for small
+installations. The installable package uses its own updater entry point so it
+can grow into multi-instance management without depending on the standalone
+variant:
+
+```text
+vs-update           run the updater
+vs-config-reset    set or clear the saved install directory
+vs-log-viewer      view updater logs and review locations
+vs-backup-restore  list or restore rollback snapshots
+```
+
+Build the Debian package locally with:
+
+```bash
+./scripts/build-deb.sh
+```
+
+The generated package is written to `dist/`:
+
+```text
+dist/vs-updater_VERSION_all.deb
+```
+
+The package installs the updater and helper commands to `/usr/bin/`. Release
+binaries should be generated from these sources and attached to GitHub Releases
+rather than committed to the main tree.
+
+### Named Instances
+
+The installed `vs-update` command can register multiple Vintage Story server
+instances and update one selected instance per run:
+
+```bash
+vs-update --add-instance survival \
+  --install-dir /home/vintagestory/survival/server \
+  --data-path /home/vintagestory/survival/data \
+  --username vintagestory \
+  --service-name vintagestory-survival.service
+
+vs-update --add-instance creative \
+  --install-dir /home/vintagestory/creative/server \
+  --data-path /home/vintagestory/creative/data \
+  --username vintagestory \
+  --service-name vintagestory-creative.service
+```
+
+Registered instances are stored in:
+
+```text
+${XDG_CONFIG_HOME:-$HOME/.config}/vs-updater/instances/
+```
+
+List and inspect them with:
+
+```bash
+vs-update --list
+vs-update --show-instance survival
+```
+
+Update an individual instance with:
+
+```bash
+vs-update --instance survival --url https://example.invalid/vintagestory-server.tar.gz
+```
+
+When multiple instances are registered and no `--instance` or `--install-dir`
+is provided, interactive mode asks which instance to update. Non-interactive
+updates should pass `--instance NAME` or `--install-dir PATH` explicitly.
+
+The updater refuses registered instances whose server or data paths overlap.
+Running-server detection is scoped to the selected instance by checking the
+configured systemd service, process command lines, and process paths beneath
+the selected install directory.
+
+For multi-instance servers, always register a `--service-name` for each
+instance. Without a service name, the updater must infer whether a server is
+running from process details, which is inherently less reliable across wrapper
+scripts, custom launchers, renamed binaries, and service managers. Failing to
+set `SERVICE_NAME` for multi-instance installations can and likely eventually
+will cause data loss or corruption if an instance is updated or restored while
+it is still running.
+
+The installed commands share one validation layer for instance config and
+safety checks. `vs-config-reset --instance` and `vs-update --add-instance`
+therefore apply the same path-overlap and data-path rules, while restore and
+update commands use the same selected-instance running checks.
+
+Update and restore operations take a per-instance lock before changing live
+files, preventing two updater commands from modifying the same server at once.
+Rollback restores copy the selected snapshot into a temporary staging directory
+before moving the live payload aside.
+
 ## Interactive Use
 
 Run:
